@@ -1,0 +1,436 @@
+---
+title: "NAPiC DMC Safety report"
+author: "Inge Christoffer Olsen, PhD"
+date: '`r format(Sys.time(), "%d %B, %Y")` '
+output: pdf_document
+params:
+  viedoc_export: "_20230125_071722"
+  randlist_name: Randlist_NAPiC_11Jan2018093156_total.xlsx
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+library(tidyverse)
+library(ggplot2)
+library(ggformula)
+library(wesanderson)
+library(purrr)
+library(rlang)
+library(glue)
+#library(kableExtra)
+library(knitr)
+
+```
+
+```{r prepare-datasets, include = FALSE}
+
+source("src/make_raw/make_raw.r")
+source("src/make_td/make_tdmisc.r")
+source("src/make_td/make_tdran.r")
+
+cleaned_pts <- read_excel("data/raw/20201006_napic_study_populations QC DM.xls") %>% 
+  rename(sas = "Safety Analysis Set", fas = "Full Analysis Set", randomised = "Randomised Set", subjectid = "Subject Id") %>% 
+  labelled::set_variable_labels(sas = "Safety Analysis Set", 
+                                fas = "Full Analysis Set", 
+                                randomised = "Randomised Set") %>% 
+  select(subjectid, sas, fas, randomised)
+
+adae <- tdran %>% 
+  select(sitename, subjectid, ranno, randt, arm) %>% 
+  left_join(tdae, by = "subjectid") %>% 
+  left_join(cleaned_pts, by = "subjectid") %>% 
+  mutate(anyae = if_else(is.na(aespid), 0, 1),
+         sae = if_else(is.na(aespid), 0, aeseryncd)
+  ) %>%  
+  group_by(subjectid) %>% 
+  mutate(n_ae = sum(anyae),
+         one_ae = n_ae == 1,
+         two_ae = n_ae == 2,
+         three_plus_ae = n_ae > 2,
+         anysae = max(sae)) %>% 
+  ungroup %>% 
+  mutate(sas = if_else(is.na(sas), 99, sas),
+         fas = if_else(is.na(fas), 99, fas),
+         randomised = if_else(is.na(randomised), 99, randomised))
+
+# tdran <- read_rds("data/td/tdran.rds")
+# raw <- read_rds("data/raw/raw.rds")
+# tdae <- read_rds("data/td/tdae.rds")
+```
+
+
+```{r ae-fn, include = FALSE}
+ae_n_pct <-  function(data, var, group, level = 1) {
+  var <- ensym(var)
+  group <- ensym(group)
+
+  data %>%
+    group_by(subjectid, !!group, !!var) %>%
+    summarise(n = sum(!!var),
+              .groups = "drop_last") %>%
+    group_by(!!group, !!var) %>%
+    summarise(n_ae = sum(n),
+            n_pat = n(),
+            .groups = "drop_last") %>%
+    group_by(!!group) %>%
+    mutate(N_pat = sum(n_pat),
+           pct = round(n_pat/N_pat*100,digits = 1),
+           txt = paste0(n_pat, " (", pct, "%)")) %>%
+    filter(!!var %in% !!level) %>%
+    ungroup %>%
+    select(!!group, txt) %>%
+    deframe
+}
+
+ae_N_n_pct <-  function(data, var, group, level = 1) {
+  var <- ensym(var)
+  group <- ensym(group)
+
+  data %>%
+    group_by(subjectid, !!group) %>%
+    summarise(n = sum(!!var),
+              .groups = "drop_last") %>%
+    mutate(!!var := if_else(n==0, 0, 1)) %>%
+    group_by(!!group, !!var) %>%
+    summarise(n_ae = sum(n),
+            n_pat = n(),
+            .groups = "drop_last") %>%
+    group_by(!!group) %>%
+    mutate(N_pat = sum(n_pat),
+           pct = round(n_pat/N_pat*100,digits = 1),
+           txt = paste0("[", n_ae,"] ", n_pat, " (", pct, "%)")) %>%
+    mutate(txt = if_else(n_ae == 0, "[0] 0 (0%)", txt)) %>%
+    filter(!!var %in% !!level) %>%
+    ungroup %>%
+    select(!!group, txt) %>%
+    deframe
+}
+
+stats_exec <- function(f, data, var, group, ...){
+    rlang::exec(f, data, var, group, !!!(...))
+}
+
+
+ae_summary_table <- tribble(
+    ~text,  ~var, ~f,
+  "Number of AEs", "anyae", "ae_N_n_pct",
+  "Number of patients with any AEs?", "anyae", "ae_n_pct",
+  "Number of patients with one AE", "one_ae", "ae_n_pct",
+  "Number of patients with two AE", "two_ae", "ae_n_pct",
+  "Number of patients with three or more AEs", "three_plus_ae", "ae_n_pct",
+  "Number of SAEs", "sae", "ae_N_n_pct",
+  "Number of patients with any SAEs?", "anysae","ae_n_pct"
+)
+
+arms <- c("Placebo", "Amoxicillin")
+
+```
+
+
+
+# Introduction
+This is the safety report for the Data Monitoring Committee meeting in the NNAPiC trial.  The data are based on an export from the Viedoc electronic data capture system time stamped "`r params$viedoc_export`". There are totally `r n_distinct(adae %>% select(subjectid))` patients in the database. Of these `r n_distinct(adae %>% filter(sas == 0) %>% select(subjectid))` are confirmed excluded from the safety set, and `r n_distinct(adae %>% filter(sas == 99) %>% select(subjectid))` were not assessed or quality checked at the time of the proposed interim analysis.
+
+Note that not all events have been coded yet, so there are some inconsistencies in the reporting. 
+
+# All patients except known exclusions
+
+First we report on the total number of subjects except those who we know are excluded. There are `r n_distinct(adae %>% filter(sas != 0) %>% select(subjectid))` in this dataset with  `r n_distinct(adae %>% filter(sas != 0 & arm == "Placebo") %>% select(subjectid))` in the placebo arm and `r n_distinct(adae %>% filter(sas != 0 & arm == "Amoxicillin") %>% select(subjectid))` in the amoxicillin arm. 
+
+
+## AE Summary
+
+```{r ae-summary1}
+
+adae1 <- adae %>% 
+  filter(sas != 0)
+
+
+total_n <- n_distinct(adae1$subjectid)
+
+header <- adae1 %>%
+  group_by(arm, subjectid) %>%
+  summarise(n=n(), .groups = "drop_last") %>%
+  group_by(arm) %>%
+  summarise(n = n(), .groups = "drop_last") %>%
+  ungroup() %>%
+  mutate(armtxt = arms) %>%
+  mutate(txt = paste0(armtxt, " (N=", n, ")")) %>%
+  select(txt) %>%
+  deframe
+
+
+tmp <- ae_summary_table %>%
+  mutate(data = list(adae1),
+         group = "arm",
+         param = list(level = 1)) %>%
+  mutate(res = pmap(list(f, data, var, group, param), stats_exec)) %>%
+  mutate(id = map(res,names)) %>%
+  unnest(c(res, id)) %>%
+  mutate(id = paste0("txt", id)) %>%
+  pivot_wider(values_from = res, names_from = id) %>%
+  select(text, starts_with("txt")) %>%
+  knitr::kable(col.names = c("Parameter", header),
+        caption = "Summary of Adverse Events")
+
+tmp
+```
+
+The numbers are [Number of events] Number of patients (percentage of patients), or Number of patients (percentage of patients)
+
+```{r aetab1}
+ae_table_fns <- function(data, filtervar){
+
+  filtervar = ensym(filtervar)
+
+  data %>%
+    group_by(arm) %>%
+    mutate(N_pat = n_distinct(subjectid)) %>%
+    filter(!!filtervar == 1)  %>%
+    group_by(subjectid, arm, N_pat, soc_name, pt_name) %>%
+    summarise(n_ae = n(),
+              .groups = "drop_last") %>%
+    filter(!is.na(pt_name)) %>%
+    group_by(arm, N_pat, soc_name, pt_name) %>%
+    summarise(n_pat = n(),
+              n_ae = sum(n_ae),
+              .groups = "drop_last") %>%
+    mutate(pct = round(n_pat/N_pat*100,digits = 1),
+           txt = paste0("[", n_ae,"] ", n_pat, " (", pct, "%)"),
+           arm = arm) %>%
+    ungroup %>% select(arm, soc_name, pt_name, txt) %>%
+    pivot_wider(values_from = txt, names_from = arm, values_fill = list(txt = "")) %>%
+    #mutate_at(vars(starts_with("arm")), ~if_else(is.na(.), "", .)) %>%
+    arrange(soc_name, pt_name) %>%  group_by(soc2 = soc_name) %>%
+    mutate(soc_name = if_else(row_number() != 1, "", soc_name)) %>% ungroup() %>% select(-soc2) %>%
+    filter(soc_name != "NA")
+}
+
+adae1 %>%
+  bind_rows(adae1, .id="added") %>%
+  mutate(pt_name = if_else(added == 2, "#Total", pt_name)) %>%
+  mutate(all = 1) %>%
+  ae_table_fns("all") %>%
+  knitr::kable(col.names = c("System Organ Class", "Preferred Term", header),
+               caption = " Adverse Events by System Organ Class and Preferred term", longtable = TRUE, booktabs = TRUE) #%>%
+  #column_spec(1:2, width = "5cm")
+```
+## Serious Adverse Events
+
+```{r saetab1}
+
+adae1 %>%
+  bind_rows(adae1, .id="added") %>%
+  mutate(pt_name = if_else(added == 2, "#Total", pt_name)) %>%
+  ae_table_fns("aeseryncd") %>%
+  knitr::kable( col.names = c("System Organ Class", "Preferred Term", header),
+               caption = "Serious Adverse Events by System Organ Class and Preferred term",
+         booktabs = TRUE,
+         longtable = TRUE) #%>%
+  #column_spec(1:2, width = "5cm")
+
+```
+
+## Suspected Unexpected Serious Adverse Reaction
+
+```{r susar1}
+
+adae1 %>%
+  bind_rows(adae1, .id="added") %>%
+  mutate(pt_name = if_else(added == 2, "#Total", pt_name)) %>%
+  mutate(susar = (aeseryncd == 1) & (saerelcd == 2) & saeexpcd ==2) %>%
+  ae_table_fns("susar") %>%
+  rename( "System Organ Class" = soc_name,  "Preferred Term" = pt_name) %>%
+  knitr::kable(
+               caption = "Suspected Unexpected Serious Adverse Reaction by System Organ Class and Preferred term",
+         booktabs = TRUE,
+         longtable = TRUE)
+
+```
+
+# Only monitored patients.
+
+Then we report on those patients who have been monitored.  There are `r n_distinct(adae %>% filter(sas == 1) %>% select(subjectid))` in this dataset with  `r n_distinct(adae %>% filter(sas == 1 & arm == "Placebo") %>% select(subjectid))` in the placebo arm and `r n_distinct(adae %>% filter(sas == 1 & arm == "Amoxicillin") %>% select(subjectid))` in the amoxicillin arm. 
+
+
+## AE Summary
+
+```{r ae-summary2}
+
+adae2 <- adae %>% 
+  filter(sas ==1)
+
+
+total_n <- n_distinct(adae2$subjectid)
+
+header <- adae2 %>%
+  group_by(arm, subjectid) %>%
+  summarise(n=n(), .groups = "drop_last") %>%
+  group_by(arm) %>%
+  summarise(n = n(), .groups = "drop_last") %>%
+  ungroup() %>%
+  mutate(armtxt = arms) %>%
+  mutate(txt = paste0(armtxt, " (N=", n, ")")) %>%
+  select(txt) %>%
+  deframe
+
+
+tmp <- ae_summary_table %>%
+  mutate(data = list(adae2),
+         group = "arm",
+         param = list(level = 1)) %>%
+  mutate(res = pmap(list(f, data, var, group, param), stats_exec)) %>%
+  mutate(id = map(res,names)) %>%
+  unnest(c(res, id)) %>%
+  mutate(id = paste0("txt", id)) %>%
+  pivot_wider(values_from = res, names_from = id) %>%
+  select(text, starts_with("txt")) %>%
+  knitr::kable(col.names = c("Parameter", header),
+        caption = "Summary of Adverse Events")
+
+tmp
+```
+
+The numbers are [Number of events] Number of patients (percentage of patients), or Number of patients (percentage of patients)
+
+```{r aetab2}
+
+
+adae2 %>%
+  bind_rows(adae2, .id="added") %>%
+  mutate(pt_name = if_else(added == 2, "#Total", pt_name)) %>%
+  mutate(all = 1) %>%
+  ae_table_fns("all") %>%
+  knitr::kable(col.names = c("System Organ Class", "Preferred Term", header),
+               caption = " Adverse Events by System Organ Class and Preferred term", longtable = TRUE, booktabs = TRUE) #%>%
+  #column_spec(1:2, width = "5cm")
+```
+## Serious Adverse Events
+
+```{r saetab2}
+
+adae2 %>%
+  bind_rows(adae2, .id="added") %>%
+  mutate(pt_name = if_else(added == 2, "#Total", pt_name)) %>%
+  ae_table_fns("aeseryncd") %>%
+  knitr::kable( col.names = c("System Organ Class", "Preferred Term", header),
+               caption = "Serious Adverse Events by System Organ Class and Preferred term",
+         booktabs = TRUE,
+         longtable = TRUE) #%>%
+  #column_spec(1:2, width = "5cm")
+
+```
+
+## Suspected Unexpected Serious Adverse Reaction
+
+```{r susar2}
+
+adae2 %>%
+  bind_rows(adae2, .id="added") %>%
+  mutate(pt_name = if_else(added == 2, "#Total", pt_name)) %>%
+  mutate(susar = (aeseryncd == 1) & (saerelcd == 2) & saeexpcd ==2) %>%
+  ae_table_fns("susar") %>%
+  rename( "System Organ Class" = soc_name,  "Preferred Term" = pt_name) %>%
+  knitr::kable(
+               caption = "Suspected Unexpected Serious Adverse Reaction by System Organ Class and Preferred term",
+         booktabs = TRUE,
+         longtable = TRUE)
+
+```
+
+
+# Only non-monitored patients.
+
+Then we report on those patients who have not been monitored.  There are `r n_distinct(adae %>% filter(sas == 99) %>% select(subjectid))` in this dataset with  `r n_distinct(adae %>% filter(sas ==99 & arm == "Placebo") %>% select(subjectid))` in the placebo arm and `r n_distinct(adae %>% filter(sas ==99 & arm == "Amoxicillin") %>% select(subjectid))` in the amoxicillin arm. 
+
+
+## AE Summary
+
+```{r ae-summary3}
+
+adae3 <- adae %>% 
+  filter(sas == 99)
+
+
+total_n <- n_distinct(adae3$subjectid)
+
+header <- adae3 %>%
+  group_by(arm, subjectid) %>%
+  summarise(n=n(), .groups = "drop_last") %>%
+  group_by(arm) %>%
+  summarise(n = n(), .groups = "drop_last") %>%
+  ungroup() %>%
+  mutate(armtxt = arms) %>%
+  mutate(txt = paste0(armtxt, " (N=", n, ")")) %>%
+  select(txt) %>%
+  deframe
+
+
+tmp <- ae_summary_table %>%
+  mutate(data = list(adae3),
+         group = "arm",
+         param = list(level = 1)) %>%
+  mutate(res = pmap(list(f, data, var, group, param), stats_exec)) %>%
+  mutate(id = map(res,names)) %>%
+  unnest(c(res, id)) %>%
+  mutate(id = paste0("txt", id)) %>%
+  pivot_wider(values_from = res, names_from = id) %>%
+  select(text, starts_with("txt")) %>%
+  knitr::kable(col.names = c("Parameter", header),
+        caption = "Summary of Adverse Events")
+
+tmp
+```
+
+The numbers are [Number of events] Number of patients (percentage of patients), or Number of patients (percentage of patients)
+
+```{r aetab3}
+
+
+adae3 %>%
+  bind_rows(adae3, .id="added") %>%
+  mutate(pt_name = if_else(added == 2, "#Total", pt_name)) %>%
+  mutate(all = 1) %>%
+  ae_table_fns("all") %>%
+  knitr::kable(col.names = c("System Organ Class", "Preferred Term", header),
+               caption = " Adverse Events by System Organ Class and Preferred term", longtable = TRUE, booktabs = TRUE) #%>%
+  #column_spec(1:2, width = "5cm")
+```
+## Serious Adverse Events
+
+```{r saetab3}
+
+adae3 %>%
+  bind_rows(adae3, .id="added") %>%
+  mutate(pt_name = if_else(added == 2, "#Total", pt_name)) %>%
+  ae_table_fns("aeseryncd") %>%
+  knitr::kable( col.names = c("System Organ Class", "Preferred Term", header),
+               caption = "Serious Adverse Events by System Organ Class and Preferred term",
+         booktabs = TRUE,
+         longtable = TRUE) #%>%
+  #column_spec(1:2, width = "5cm")
+
+```
+
+## Suspected Unexpected Serious Adverse Reaction
+
+```{r susar3}
+
+adae3 %>%
+  bind_rows(adae3, .id="added") %>%
+  mutate(pt_name = if_else(added == 2, "#Total", pt_name)) %>%
+  mutate(susar = (aeseryncd == 1) & (saerelcd == 2) & saeexpcd ==2) %>%
+  ae_table_fns("susar") %>%
+  rename( "System Organ Class" = soc_name,  "Preferred Term" = pt_name) %>%
+  knitr::kable(
+               caption = "Suspected Unexpected Serious Adverse Reaction by System Organ Class and Preferred term",
+         booktabs = TRUE,
+         longtable = TRUE)
+
+```
+
+
+
+
+
